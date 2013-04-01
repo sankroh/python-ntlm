@@ -7,28 +7,29 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 # Lesser General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/> or <http://www.gnu.org/licenses/lgpl.txt>.
 
+import base64
+import string
 import urllib2
 import httplib, socket
 from urllib import addinfourl
 import ntlm
-import re
 
 class AbstractNtlmAuthHandler:
     def __init__(self, password_mgr=None, debuglevel=0):
         """Initialize an instance of a AbstractNtlmAuthHandler.
 
-Verify operation with all default arguments.
->>> abstrct = AbstractNtlmAuthHandler()
+        Verify operation with all default arguments.
+        >>> abstrct = AbstractNtlmAuthHandler()
 
-Verify "normal" operation.
->>> abstrct = AbstractNtlmAuthHandler(urllib2.HTTPPasswordMgrWithDefaultRealm())
-"""
+        Verify "normal" operation.
+        >>> abstrct = AbstractNtlmAuthHandler(urllib2.HTTPPasswordMgrWithDefaultRealm())
+        """
         if password_mgr is None:
-            password_mgr = urllib2.HTTPPasswordMgr()
+            password_mgr = HTTPPasswordMgr()
         self.passwd = password_mgr
         self.add_password = self.passwd.add_password
         self._debuglevel = debuglevel
@@ -46,19 +47,10 @@ Verify "normal" operation.
     def retry_using_http_NTLM_auth(self, req, auth_header_field, realm, headers):
         user, pw = self.passwd.find_user_password(realm, req.get_full_url())
         if pw is not None:
-            user_parts = user.split('\\', 1)
-            if len(user_parts) == 1:
-                UserName = user_parts[0]
-                DomainName = ''
-                type1_flags = ntlm.NTLM_TYPE1_FLAGS & ~ntlm.NTLM_NegotiateOemDomainSupplied
-            else:
-                DomainName = user_parts[0].upper()
-                UserName = user_parts[1]
-                type1_flags = ntlm.NTLM_TYPE1_FLAGS
             # ntlm secures a socket, so we must use the same socket for the complete handshake
             headers = dict(req.headers)
             headers.update(req.unredirected_hdrs)
-            auth = 'NTLM %s' % ntlm.create_NTLM_NEGOTIATE_MESSAGE(user, type1_flags)
+            auth = 'NTLM %s' % asbase64(ntlm.create_NTLM_NEGOTIATE_MESSAGE(user))
             if req.headers.get(self.auth_header, None) == auth:
                 return None
             headers[self.auth_header] = auth
@@ -84,15 +76,11 @@ Verify "normal" operation.
                 headers['Cookie'] = r.getheader('set-cookie')
             r.fp = None # remove the reference to the socket, so that it can not be closed by the response object (we want to keep the socket open)
             auth_header_value = r.getheader(auth_header_field, None)
-
-            # some Exchange servers send two WWW-Authenticate headers, one with the NTLM challenge
-            # and another with the 'Negotiate' keyword - make sure we operate on the right one
-            m = re.match('(NTLM [A-Za-z0-9+\-/=]+)', auth_header_value)
-            if m:
-                auth_header_value, = m.groups()
-
-            (ServerChallenge, NegotiateFlags) = ntlm.parse_NTLM_CHALLENGE_MESSAGE(auth_header_value[5:])
-            auth = 'NTLM %s' % ntlm.create_NTLM_AUTHENTICATE_MESSAGE(ServerChallenge, UserName, DomainName, pw, NegotiateFlags)
+            (ServerChallenge, NegotiateFlags) = ntlm.parse_NTLM_CHALLENGE_MESSAGE(base64.decodestring(auth_header_value[5:]))
+            user_parts = user.split('\\', 1)
+            DomainName = user_parts[0].upper()
+            UserName = user_parts[1]
+            auth = 'NTLM %s' % asbase64(ntlm.create_NTLM_AUTHENTICATE_MESSAGE(ServerChallenge, UserName, DomainName, pw, NegotiateFlags))
             headers[self.auth_header] = auth
             headers["Connection"] = "Close"
             headers = dict((name.title(), val) for name, val in headers.items())
@@ -122,8 +110,8 @@ class HTTPNtlmAuthHandler(AbstractNtlmAuthHandler, urllib2.BaseHandler):
 
 
 class ProxyNtlmAuthHandler(AbstractNtlmAuthHandler, urllib2.BaseHandler):
-    """ 
-        CAUTION: this class has NOT been tested at all!!! 
+    """
+        CAUTION: this class has NOT been tested at all!!!
         use at your own risk
     """
     auth_header = 'Proxy-authorization'
@@ -131,29 +119,26 @@ class ProxyNtlmAuthHandler(AbstractNtlmAuthHandler, urllib2.BaseHandler):
     def http_error_407(self, req, fp, code, msg, headers):
         return self.http_error_authentication_required('proxy-authenticate', req, fp, headers)
 
+def asbase64(msg):
+    return string.replace(base64.encodestring(msg), '\n', '')
 
 if __name__ == "__main__":
-    import doctest
-    doctest.testmod()
+    url = "http://ntlmprotectedserver/securedfile.html"
+    user = u'DOMAIN\\User'
+    password = 'Password'
 
-### TODO: Move this to the ntlm examples directory.
-##if __name__ == "__main__":
-##    url = "http://ntlmprotectedserver/securedfile.html"
-##    user = u'DOMAIN\\User'
-##    password = 'Password'
-##
-##    passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
-##    passman.add_password(None, url, user , password)
-##    auth_basic = urllib2.HTTPBasicAuthHandler(passman)
-##    auth_digest = urllib2.HTTPDigestAuthHandler(passman)
-##    auth_NTLM = HTTPNtlmAuthHandler(passman)
-##
-##    # disable proxies (just for testing)
-##    proxy_handler = urllib2.ProxyHandler({})
-##
-##    opener = urllib2.build_opener(proxy_handler, auth_NTLM) #, auth_digest, auth_basic)
-##
-##    urllib2.install_opener(opener)
-##
-##    response = urllib2.urlopen(url)
-##    print(response.read())
+    passman = urllib2.HTTPPasswordMgrWithDefaultRealm()
+    passman.add_password(None, url, user , password)
+    auth_basic = urllib2.HTTPBasicAuthHandler(passman)
+    auth_digest = urllib2.HTTPDigestAuthHandler(passman)
+    auth_NTLM = HTTPNtlmAuthHandler(passman)
+
+    # disable proxies (just for testing)
+    proxy_handler = urllib2.ProxyHandler({})
+
+    opener = urllib2.build_opener(proxy_handler, auth_NTLM) #, auth_digest, auth_basic)
+
+    urllib2.install_opener(opener)
+
+    response = urllib2.urlopen(url)
+    print(response.read())
